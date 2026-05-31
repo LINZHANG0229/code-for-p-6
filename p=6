@@ -1,0 +1,146 @@
+clear; clc; close all;
+
+%% 1. Load Audio and Initialization
+filename = 'digital signal processing.wav';
+if ~isfile(filename)
+    error('Audio file not found. Please ensure "digital signal processing.wav" is in the current directory.');
+end
+
+[x, Fs] = audioread(filename);
+if size(x, 2) > 1, x = mean(x, 2); end
+
+% System Parameters
+p = 6;                         % LPC prediction order
+frame_time = 0.02;              % Frame duration (20ms)
+frame_len = round(frame_time * Fs); 
+num_frames = floor(length(x) / frame_len);
+alpha = 0.97;                   % Pre-emphasis coefficient
+
+% Initialization
+y_syn = zeros(length(x), 1);
+filter_state = zeros(p, 1);
+pitch_phase = 1; 
+
+% Storage for compression parameters (The actual data to be transmitted)
+lpc_params_storage = zeros(num_frames, p + 2);
+
+%% 2. Pre-emphasis
+x_pre = filter([1, -alpha], 1, x);
+
+disp('>>> Performing LPC Encoding Analysis (Feature Extraction)...');
+
+%% 3. Frame-by-Frame Processing (Encoder & Decoder)
+for i = 1:num_frames
+    idx_start = (i-1)*frame_len + 1;
+    idx_end = i*frame_len;
+    frame = x_pre(idx_start:idx_end);
+    win_frame = frame .* hamming(frame_len);
+    
+    % --- [Encoder Side] ---
+    [a, E] = lpc(win_frame, p);
+    e_n = filter(a, 1, win_frame); % Residual signal e(n)
+    
+    % Pitch Detection
+    r = xcorr(e_n);
+    r = r(frame_len:end);
+    min_lag = round(Fs / 500); max_lag = round(Fs / 50);
+    [peak_val, peak_idx] = max(r(min_lag:max_lag));
+    lag = peak_idx + min_lag - 1;
+    
+    if peak_val > 0.3 * r(1)
+        is_voiced = true; pitch = lag;
+    else
+        is_voiced = false; pitch = 0;
+    end
+    
+    % Store compressed parameters: [coefficients, gain, pitch]
+    lpc_params_storage(i, :) = [a(2:end), sqrt(E), pitch]; 
+    
+    % --- [Decoder Side] ---
+    e_source_n = zeros(frame_len, 1);
+    G = sqrt(E);
+    
+    if is_voiced
+        % Voiced: Impulse train
+        pulses = pitch_phase : pitch : frame_len;
+        e_source_n(pulses) = 1;
+        pitch_phase = pitch - (frame_len - max(pulses));
+        if isempty(pulses), pitch_phase = pitch_phase - pitch; end
+        e_source_n = e_source_n * (G / (std(e_source_n) + eps));
+    else
+        % Unvoiced: White noise
+        e_source_n = randn(frame_len, 1) * G;
+        pitch_phase = 1; 
+    end
+    
+    [syn_frame, filter_state] = filter(1, a, e_source_n, filter_state);
+    y_syn(idx_start:idx_end) = syn_frame;
+end
+
+%% 4. De-emphasis and Normalization
+y_final = filter(1, [1, -alpha], y_syn);
+y_final = y_final / (max(abs(y_final)) + eps);
+
+%% 5. File Generation and Export
+disp('>>> Generating compressed audio and parameter files...');
+
+% A. Save synthesized WAV (The result you hear)
+output_audio = 'p=6.wav';
+audiowrite(output_audio, y_final, Fs);
+
+% B. Save compressed parameters MAT (The proof of compression)
+output_data = 'lpc_compressed_params.mat';
+save(output_data, 'lpc_params_storage');
+
+% Get file size information
+file_info_orig = dir(filename);
+file_info_comp = dir(output_data);
+size_orig = file_info_orig.bytes / 1024;
+size_comp = file_info_comp.bytes / 1024;
+
+fprintf('\n====================================\n');
+fprintf('  Data Comparison (for Presentation)\n');
+fprintf('------------------------------------\n');
+fprintf(' Original Audio:    %-15s (%.2f KB)\n', filename, size_orig);
+fprintf(' Compressed Params: %-15s (%.2f KB)\n', output_data, size_comp);
+fprintf(' Compression Ratio: %.2f x\n', size_orig / size_comp);
+fprintf('====================================\n');
+
+%% 6. Visualization: Waveforms and Envelopes
+figure('Name', 'LPC System Analysis and Compression Demo', 'Color', 'w', 'Position', [100, 100, 900, 700]);
+
+plot_range = round(length(x)/2) : round(length(x)/2) + 2*frame_len;
+t = (0:length(plot_range)-1) / Fs;
+
+% Subplot 1: Original Waveform and Envelope
+subplot(3,1,1);
+plot(t, x(plot_range), 'Color', [0.7 0.7 0.7]); hold on;
+[env_upper_orig, ~] = envelope(x(plot_range), 80, 'peak');
+plot(t, env_upper_orig, 'b', 'LineWidth', 1.5);
+title('Original Audio Waveform & Extracted Envelope');
+legend('Original Waveform', 'Envelope');
+grid on; ylabel('Amplitude');
+
+% Subplot 2: Reconstructed Waveform and Envelope
+subplot(3,1,2);
+plot(t, y_final(plot_range), 'Color', [1 0.7 0.7]); hold on;
+[env_upper_syn, ~] = envelope(y_final(plot_range), 80, 'peak');
+plot(t, env_upper_syn, 'r', 'LineWidth', 1.5);
+title('LPC Reconstructed Waveform & Restored Envelope');
+legend('Synthesized Waveform', 'Restored Envelope');
+grid on; ylabel('Amplitude');
+
+% Subplot 3: Residual vs Excitation
+subplot(3,1,3);
+zoom_idx = 1:frame_len;
+plot(e_n(zoom_idx), 'k', 'LineWidth', 1); hold on;
+plot(e_source_n(zoom_idx), 'g', 'LineWidth', 1);
+title('Source Modeling: Residual e(n) vs Excitation e_{source}(n)');
+legend('Actual Residual', 'Synthesized Excitation');
+xlabel('Samples'); grid on;
+
+% Open folder automatically for convenience
+if ispc
+    winopen(pwd); 
+end
+disp('>>> Processing Complete! You can now download the .wav and .mat files from the folder.');
